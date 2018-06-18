@@ -1,0 +1,167 @@
+#!/bin/bash
+RED='\033[0;31m'
+BLUE='\033[1;34m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+
+display_usage ()
+{
+  echo -e "${CYAN}Usage: s3local [--list-buckets] [--bucket-date="bucket_name"] [--file-count="bucket_name"] [--bucket-size="bucket_name"] [--latest-file="bucket_name"] [--storage-cost="bucket_name"] [--all="bucket_name"][--help]"
+  echo -e "\n"
+  echo -e "${YELLOW}  Default --credentials is '~/.aws/credentials'"
+  echo -e "${YELLOW}  Default --profile is 'default'"
+  echo -e "\n"
+  echo -e "${GREEN}--bucket-date ${BLUE} Returns the creation date of bucket"
+  echo -e "${GREEN}--filecount ${BLUE}Returns the total number of objects in the bucket"
+  echo -e "${GREEN}--bucket-size ${BLUE}Returns the total storage used by bucket"
+  echo -e "${GREEN}--latest-file ${BLUE}Returns the recent created/modified file in the bucket"
+  echo -e "${GREEN}--storage-cost ${BLUE}Returns the total storage cost of the bucket. Cost assumptions are based on the us-east region s3 storage charges"
+  echo -e "${GREEN}--help ${BLUE}Displays the attributes can be used with s3local command"
+}
+
+bucket_size ()
+{
+    size=$(aws s3api list-objects --bucket ${bucketname} --output json --query "sum(Contents[].Size)")
+    sizegb=`expr $size / \( 1024 \* 1024 \* 1024 \)`
+    remgb=`expr $size % \( 1024 \* 1024 \* 1024 \)`
+
+    sizemb=`expr $remgb / \( 1024 \* 1024 \)`
+    remmb=`expr $remgb / \( 1024 \* 1024 \)`
+
+    sizekb=`expr $remmb / 1024`
+    bytes=`expr $remmb % 1024`
+}
+
+bucket_cost ()
+{
+totalcost=0
+storagetype=("STANDARD" "STANDARD_IA" "ONEZONE_IA" "GLACIER")
+
+for u in "${storagetype[@]}"
+do
+size=$(aws s3api list-objects --bucket ${bucketname} --output json --query 'sum(Contents[?starts_with(StorageClass, `'${u}'`)].Size)')
+
+sizegb=`expr $size / \( 1024 \* 1024 \* 1024 \)`
+
+if [ "${u}" == "STANDARD" ];
+then
+  if [ $sizegb -gt "512000" ];
+  then
+    cost=$(echo $size*0.021 | bc | awk -F. '{print $1}')
+
+  else
+    if [ $sizegb -gt "51200" ]; 
+       then
+         {
+         sizegb1=`expr $sizegb - 51200`
+         extracost=$(echo $sizegb1*0.022 | bc | awk -F. '{print $1}')
+         cost=`expr $extracost + 1178`
+         }
+    else
+      cost=$(echo $sizegb*0.023 | bc | awk -F. '{print $1}')        
+    fi    
+  fi  
+fi
+
+if [ ${u} == "STANDARD_IA" ];
+then
+cost=$(echo $sizegb*0.0125 | bc | awk -F. '{print $1}')     
+fi
+
+if [ ${u} == "ONEZONE_IA" ];
+then
+cost=$(echo $sizegb*0.01 | bc | awk -F. '{print $1}')     
+fi
+
+if [ ${u} == "GLACIER" ];
+then
+  cost=$(echo $sizegb*0.004 | bc | awk -F. '{print $1}')
+fi
+
+totalcost=`expr $totalcost + $cost`
+
+done
+}
+
+all_details ()
+{
+    createdate=$(aws s3 ls | grep -i ${bucketname} | awk '{print $1}')
+    filecount=$(aws s3 ls s3://${bucketname} --recursive | wc -l)
+    latest_file=$(aws s3 ls s3://${bucketname} --recursive | sort -u -k1 -r | head -n +1 | awk '{print $4}')
+    latest_date=$(aws s3 ls s3://${bucketname} --recursive | sort -u -k1 -r | head -n +1 | awk '{print $1}')
+    bucket_size
+    bucket_cost
+}
+
+if [ -z $1 ];
+then
+    display_usage
+    exit 1;
+fi
+
+for i in "$@"
+do
+case $i in
+    --list-buckets)
+    aws s3 ls
+    shift # past argument with no value
+    ;;
+    --bucket-date=*)
+    bucketname="${i#*=}"
+    createdate=$(aws s3 ls | grep -i ${bucketname} | awk '{print $1}')
+    echo "${bucketname} ${createdate}"
+    shift # past argument with no value
+    ;;
+    --file-count=*)
+    bucketname="${i#*=}"
+    filecount=$(aws s3 ls s3://${bucketname} --recursive | wc -l)
+    echo "${bucketname} $filecount"
+    shift # past argument with no value
+    ;;
+    --bucket-size=*)
+    bucketname="${i#*=}"
+    bucket_size
+    echo "${bucketname} ${sizegb} GB ${sizemb} MB ${sizekb} KB ${bytes} Bytes"
+    shift # past argument with no value
+    ;;
+    --latest-file=*)
+    bucketname="${i#*=}"
+    aws s3 ls s3://${bucketname} --recursive | sort -u -k1 -r | head -n +1 | awk '{print $4 " is the latest file of date " $1}'
+    shift # past argument with no value
+    ;;
+    --storage-cost=*)
+    bucketname="${i#*=}"
+    bucket_cost
+    echo "total cost of bucket is ${totalcost}$"
+    echo "${YELLOW}Cost is calculated on basis of us-east region s3 storage rates"
+    shift # past argument with no value
+    ;;
+
+    --all=*)
+    bucketname="${i#*=}"
+    all_details
+    echo -e "${GREEN}Here are the following details of ${BLUE}${bucketname}"
+    echo -e "\n"
+    echo -e "${YELLOW}The bucket is created on ${BLUE}${createdate}"
+    echo -e "${YELLOW}There are ${BLUE}${filecount} ${YELLOW}files in bucket"
+    echo -e "${YELLOW}The latest file in bucket is ${BLUE}${latest_file}${YELLOW} of date ${BLUE}${latest_date}"
+    echo -e "${YELLOW}The total size of bucket is ${BLUE}${sizegb} GB ${sizemb} MB ${sizekb} KB ${bytes} Bytes"
+    echo -e "${YELLOW}THe total storage cost of bucket is ${BLUE}${totalcost}$"
+    shift # past argument with no value
+    ;;
+
+    --help)
+    display_usage
+    exit 0
+    ;;
+    *)
+
+    # unknown option
+    echo -e "${RED}Unknown option $1"
+    echo -e "\n"
+    display_usage
+    exit 1
+    ;;
+esac
+done
